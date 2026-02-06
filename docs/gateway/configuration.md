@@ -1681,7 +1681,18 @@ Each `agents.defaults.models` entry can include:
 - `alias` (optional model shortcut, e.g. `/opus`).
 - `params` (optional provider-specific API params passed through to the model request).
 
-`params` is also applied to streaming runs (embedded agent + compaction). Supported keys today: `temperature`, `maxTokens`. These merge with call-time options; caller-supplied values win. `temperature` is an advanced knob—leave unset unless you know the model’s defaults and need a change.
+`params` is also applied to streaming runs (embedded agent + compaction). Supported keys today: `temperature`, `maxTokens`, `thinking`, `effort`. These merge with call-time options; caller-supplied values win. `temperature` is an advanced knob—leave unset unless you know the model's defaults and need a change.
+
+**Opus 4.6 Extended Thinking & Effort Parameters:**
+
+- `thinking` (object): Control extended thinking behavior
+  - `type`: `"adaptive"` (recommended for Opus 4.6) or `"enabled"` (legacy, deprecated)
+  - `budget_tokens` (number, optional): Only used with `type: "enabled"` to set thinking token budget
+- `effort` (string): Control response thoroughness (`"low"`, `"medium"`, `"high"`, `"max"`)
+  - `"max"`: Opus 4.6 only - absolute maximum capability with no constraints
+  - `"high"`: Default - complex reasoning and thorough analysis
+  - `"medium"`: Balanced approach with moderate token savings
+  - `"low"`: Most efficient - optimized for speed and cost
 
 Example:
 
@@ -1692,6 +1703,13 @@ Example:
       models: {
         "anthropic/claude-sonnet-4-5-20250929": {
           params: { temperature: 0.6 },
+        },
+        "anthropic/claude-opus-4-6": {
+          // Opus 4.6: adaptive thinking with max effort
+          params: {
+            thinking: { type: "adaptive" },
+            effort: "max",
+          },
         },
         "openai/gpt-5.2": {
           params: { maxTokens: 8192 },
