@@ -394,6 +394,51 @@ async function buildVeniceProvider(): Promise<ProviderConfig> {
   };
 }
 
+function buildAnthropicProvider(): ProviderConfig {
+  return {
+    baseUrl: "https://api.anthropic.com",
+    api: "anthropic-messages",
+    models: [
+      {
+        id: "claude-opus-4-6",
+        name: "Claude Opus 4.6",
+        reasoning: true,
+        input: ["text", "image"] as ModelDefinitionConfig["input"],
+        cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+        contextWindow: 200000,
+        maxTokens: 128000,
+      },
+      {
+        id: "claude-opus-4-5",
+        name: "Claude Opus 4.5",
+        reasoning: true,
+        input: ["text", "image"] as ModelDefinitionConfig["input"],
+        cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+        contextWindow: 200000,
+        maxTokens: 32000,
+      },
+      {
+        id: "claude-sonnet-4-5",
+        name: "Claude Sonnet 4.5",
+        reasoning: true,
+        input: ["text", "image"] as ModelDefinitionConfig["input"],
+        cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+        contextWindow: 200000,
+        maxTokens: 16000,
+      },
+      {
+        id: "claude-haiku-4-5",
+        name: "Claude Haiku 4.5",
+        reasoning: false,
+        input: ["text", "image"] as ModelDefinitionConfig["input"],
+        cost: { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1 },
+        contextWindow: 200000,
+        maxTokens: 8192,
+      },
+    ],
+  };
+}
+
 async function buildOllamaProvider(): Promise<ProviderConfig> {
   const models = await discoverOllamaModels();
   return {
@@ -496,6 +541,14 @@ export async function resolveImplicitProviders(params: {
     resolveApiKeyFromProfiles({ provider: "ollama", store: authStore });
   if (ollamaKey) {
     providers.ollama = { ...(await buildOllamaProvider()), apiKey: ollamaKey };
+  }
+
+  // Anthropic provider - add built-in model definitions when credentials are available
+  const anthropicKey =
+    resolveEnvApiKeyVarName("anthropic") ??
+    resolveApiKeyFromProfiles({ provider: "anthropic", store: authStore });
+  if (anthropicKey) {
+    providers.anthropic = { ...buildAnthropicProvider(), apiKey: anthropicKey };
   }
 
   return providers;
