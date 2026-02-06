@@ -26,8 +26,18 @@ export function resolveExtraParams(params: {
 }
 
 type CacheRetention = "none" | "short" | "long";
-type CacheRetentionStreamOptions = Partial<SimpleStreamOptions> & {
+type ThinkingType = "adaptive" | "enabled";
+type EffortLevel = "low" | "medium" | "high" | "max";
+
+type ExtendedStreamOptions = Partial<SimpleStreamOptions> & {
   cacheRetention?: CacheRetention;
+  thinking?: {
+    type: ThinkingType;
+    budget_tokens?: number;
+  };
+  output_config?: {
+    effort?: EffortLevel;
+  };
 };
 
 /**
@@ -73,7 +83,7 @@ function createStreamFnWithExtraParams(
     return undefined;
   }
 
-  const streamParams: CacheRetentionStreamOptions = {};
+  const streamParams: ExtendedStreamOptions = {};
   if (typeof extraParams.temperature === "number") {
     streamParams.temperature = extraParams.temperature;
   }
@@ -83,6 +93,31 @@ function createStreamFnWithExtraParams(
   const cacheRetention = resolveCacheRetention(extraParams, provider);
   if (cacheRetention) {
     streamParams.cacheRetention = cacheRetention;
+  }
+
+  // Handle thinking parameter (Opus 4.6 adaptive thinking or legacy enabled mode)
+  if (extraParams.thinking && typeof extraParams.thinking === "object") {
+    const thinking = extraParams.thinking as Record<string, unknown>;
+    const thinkingType = thinking.type;
+    if (thinkingType === "adaptive" || thinkingType === "enabled") {
+      streamParams.thinking = {
+        type: thinkingType as ThinkingType,
+      };
+      // budget_tokens only applies to "enabled" mode
+      if (thinkingType === "enabled" && typeof thinking.budget_tokens === "number") {
+        streamParams.thinking.budget_tokens = thinking.budget_tokens;
+      }
+    }
+  }
+
+  // Handle effort parameter (Opus 4.6)
+  if (extraParams.effort && typeof extraParams.effort === "string") {
+    const effort = extraParams.effort as string;
+    if (["low", "medium", "high", "max"].includes(effort)) {
+      streamParams.output_config = {
+        effort: effort as EffortLevel,
+      };
+    }
   }
 
   if (Object.keys(streamParams).length === 0) {
