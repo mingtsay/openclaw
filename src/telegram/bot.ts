@@ -45,8 +45,10 @@ import {
   resolveTelegramStreamMode,
 } from "./bot/helpers.js";
 import {
+  registerBotForExternalMessages,
   registerGroupHistories,
   resolveExternalMessagesConfig,
+  unregisterBotForExternalMessages,
   unregisterGroupHistories,
 } from "./external-messages.js";
 import { resolveTelegramFetch } from "./fetch.js";
@@ -236,10 +238,12 @@ export function createTelegramBot(opts: TelegramBotOptions) {
   );
   const groupHistories = new Map<string, HistoryEntry[]>();
 
-  // Register group histories for external message injection (Plan C)
+  // Register bot for external message injection (Plan C v2)
+  // External messages are now fed through bot.handleUpdate() for full pipeline processing.
   const externalConfig = resolveExternalMessagesConfig(account.accountId);
   if (externalConfig) {
     registerGroupHistories(account.accountId, groupHistories, externalConfig);
+    registerBotForExternalMessages(account.accountId, bot, externalConfig);
     logVerbose(
       `telegram: external messages enabled for account ${account.accountId} (historyLimit=${externalConfig.historyLimit})`,
     );

@@ -1,24 +1,25 @@
 /**
  * External Messages HTTP Endpoint for Telegram
  *
- * This module provides an HTTP endpoint that allows external services (e.g., Telethon userbot)
- * to inject messages into the group history buffer without triggering AI responses.
+ * Plan C v2: External messages are injected as synthetic Telegram Updates
+ * and processed through the bot's normal message pipeline (bot.on('message')).
+ * This means they go through the full envelope → context → history flow,
+ * appearing identical to native Telegram messages from the AI's perspective.
  *
- * Plan C Implementation:
- * - POST /api/telegram/external-messages
- * - Receives messages from external bots observing conversations
- * - Writes to groupHistories for context, but doesn't trigger AI replies
- * - Requires shared secret authentication
+ * POST /api/telegram/external-messages
+ * - Receives messages from external bots (e.g., Telethon userbot)
+ * - Constructs a synthetic Telegram Update object
+ * - Feeds it through bot.handleUpdate() for full pipeline processing
+ * - Requires Bearer token authentication
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { HistoryEntry } from "../auto-reply/reply/history.js";
+import type { Update, Message, Chat, User } from "@grammyjs/types";
+import type { Bot } from "grammy";
 import type { EnvelopeFormatOptions } from "../auto-reply/envelope.js";
-import { recordPendingHistoryEntryIfEnabled } from "../auto-reply/reply/history.js";
-import { formatInboundEnvelope, resolveEnvelopeFormatOptions } from "../auto-reply/envelope.js";
+import { resolveEnvelopeFormatOptions } from "../auto-reply/envelope.js";
 import { loadConfig } from "../config/config.js";
 import { logVerbose } from "../globals.js";
-import { buildTelegramGroupPeerId } from "./bot/helpers.js";
 
 // -----------------------------------------------------------------------------
 // Types
@@ -57,40 +58,46 @@ export type ExternalMessagesConfig = {
 };
 
 // -----------------------------------------------------------------------------
-// Registry: Store groupHistories by accountId
+// Registry: Store bot instances and configs by accountId
 // -----------------------------------------------------------------------------
 
-const groupHistoriesRegistry = new Map<string, Map<string, HistoryEntry[]>>();
+const botRegistry = new Map<string, Bot>();
 const configRegistry = new Map<string, ExternalMessagesConfig>();
 
+/** Counter for generating unique synthetic update IDs (negative to avoid clashing with real ones) */
+let syntheticUpdateCounter = -1;
+
 /**
- * Register a groupHistories map for a Telegram account.
+ * Register a bot instance for external message injection.
  * Called when the bot starts.
  */
-export function registerGroupHistories(
+export function registerBotForExternalMessages(
   accountId: string,
-  historyMap: Map<string, HistoryEntry[]>,
+  bot: Bot,
   config: ExternalMessagesConfig,
 ): void {
-  groupHistoriesRegistry.set(accountId, historyMap);
+  botRegistry.set(accountId, bot);
   configRegistry.set(accountId, config);
   logVerbose(`telegram: registered external-messages handler for account ${accountId}`);
 }
 
 /**
- * Unregister a groupHistories map when the bot stops.
+ * Unregister a bot instance when the bot stops.
  */
-export function unregisterGroupHistories(accountId: string): void {
-  groupHistoriesRegistry.delete(accountId);
+export function unregisterBotForExternalMessages(accountId: string): void {
+  botRegistry.delete(accountId);
   configRegistry.delete(accountId);
   logVerbose(`telegram: unregistered external-messages handler for account ${accountId}`);
 }
 
-/**
- * Get the groupHistories map for an account.
- */
-export function getGroupHistories(accountId: string): Map<string, HistoryEntry[]> | undefined {
-  return groupHistoriesRegistry.get(accountId);
+// Keep backward-compatible exports for bot.ts (groupHistories registration is no longer needed
+// but we keep the function signatures to avoid breaking imports during transition).
+// biome-ignore lint/suspicious/noExplicitAny: backward compat
+export function registerGroupHistories(_accountId: string, _historyMap: any, _config: any): void {
+  // No-op: replaced by registerBotForExternalMessages
+}
+export function unregisterGroupHistories(_accountId: string): void {
+  // No-op: replaced by unregisterBotForExternalMessages
 }
 
 // -----------------------------------------------------------------------------
@@ -132,12 +139,10 @@ async function readJsonBody(req: IncomingMessage, maxBytes = 1024 * 1024): Promi
 }
 
 function extractToken(req: IncomingMessage): string | null {
-  // Check Authorization: Bearer <token>
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith("Bearer ")) {
     return authHeader.slice(7).trim();
   }
-  // Check X-OpenClaw-Token header
   const tokenHeader = req.headers["x-openclaw-token"];
   if (typeof tokenHeader === "string") {
     return tokenHeader.trim();
@@ -150,60 +155,75 @@ function validatePayload(payload: unknown): payload is ExternalMessagePayload {
     return false;
   }
   const p = payload as Record<string, unknown>;
-
-  // Required fields
   if (p.chatId == null) return false;
   if (p.messageId == null) return false;
   if (typeof p.senderName !== "string" || !p.senderName.trim()) return false;
   if (typeof p.text !== "string") return false;
   if (typeof p.timestamp !== "number") return false;
-
   return true;
 }
 
-function buildSenderLabel(payload: ExternalMessagePayload): string {
-  const name = payload.senderName.trim();
-  const username = payload.senderUsername?.trim();
-  const id = payload.senderId;
+/**
+ * Build a synthetic Telegram Update from the external payload.
+ * The update looks like a real Telegram message so it flows through
+ * the full bot.on('message') pipeline.
+ */
+function buildSyntheticUpdate(payload: ExternalMessagePayload): Update {
+  const updateId = syntheticUpdateCounter--;
+  const chatId = Number(payload.chatId);
+  const messageId = Number(payload.messageId);
+  const senderId = payload.senderId ? Number(payload.senderId) : 0;
+  const firstName = payload.senderName.trim();
 
-  if (username && id) {
-    return `${name} (@${username} id:${id})`;
-  }
-  if (username) {
-    return `${name} (@${username})`;
-  }
-  if (id) {
-    return `${name} (id:${id})`;
-  }
-  return name;
+  const from: User = {
+    id: senderId,
+    is_bot: false,
+    first_name: firstName,
+    ...(payload.senderUsername ? { username: payload.senderUsername } : {}),
+  };
+
+  // Groups have negative chat IDs; build appropriate chat type
+  const isGroup = chatId < 0;
+  const chat: Chat = isGroup
+    ? ({
+        id: chatId,
+        type: "supergroup" as const,
+        title: `Chat ${chatId}`,
+      } as Chat)
+    : ({
+        id: chatId,
+        type: "private" as const,
+        first_name: firstName,
+      } as Chat);
+
+  const message: Message = {
+    message_id: messageId,
+    date: payload.timestamp,
+    chat,
+    from,
+    text: payload.text,
+    ...(payload.replyToMessageId
+      ? {
+          reply_to_message: {
+            message_id: Number(payload.replyToMessageId),
+            date: payload.timestamp,
+            chat,
+          } as Message,
+        }
+      : {}),
+    ...(payload.topicId ? { message_thread_id: payload.topicId } : {}),
+  };
+
+  return {
+    update_id: updateId,
+    message,
+  };
 }
 
 /**
  * Handle external message injection request.
  *
  * POST /api/telegram/external-messages
- *
- * Headers:
- *   - Authorization: Bearer <secret>
- *   - X-OpenClaw-Token: <secret>
- *
- * Body (JSON):
- *   {
- *     chatId: number | string,
- *     messageId: number | string,
- *     senderName: string,
- *     senderUsername?: string,
- *     senderId?: number | string,
- *     text: string,
- *     timestamp: number,
- *     replyToMessageId?: number | string,
- *     topicId?: number,
- *     accountId?: string
- *   }
- *
- * Response:
- *   { ok: true, historyKey: string, entriesCount: number }
- *   { ok: false, error: string }
  */
 export async function handleExternalMessagesRequest(
   req: IncomingMessage,
@@ -211,12 +231,10 @@ export async function handleExternalMessagesRequest(
 ): Promise<boolean> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
-  // Only handle our specific path
   if (url.pathname !== "/api/telegram/external-messages") {
     return false;
   }
 
-  // Method check
   if (req.method !== "POST") {
     res.statusCode = 405;
     res.setHeader("Allow", "POST");
@@ -225,7 +243,7 @@ export async function handleExternalMessagesRequest(
     return true;
   }
 
-  // Require token in headers (not query params for security)
+  // Reject tokens in query params
   if (url.searchParams.has("token") || url.searchParams.has("secret")) {
     sendJson(res, 400, {
       ok: false,
@@ -241,7 +259,6 @@ export async function handleExternalMessagesRequest(
     return true;
   }
 
-  // Parse request body
   let payload: unknown;
   try {
     payload = await readJsonBody(req);
@@ -251,7 +268,6 @@ export async function handleExternalMessagesRequest(
     return true;
   }
 
-  // Validate payload structure
   if (!validatePayload(payload)) {
     sendJson(res, 400, {
       ok: false,
@@ -260,14 +276,12 @@ export async function handleExternalMessagesRequest(
     return true;
   }
 
-  // Resolve account
   const accountId = payload.accountId?.trim() || "default";
 
-  // Check if we have a registered handler for this account
-  const historyMap = groupHistoriesRegistry.get(accountId);
+  const bot = botRegistry.get(accountId);
   const config = configRegistry.get(accountId);
 
-  if (!historyMap || !config) {
+  if (!bot || !config) {
     sendJson(res, 503, {
       ok: false,
       error: `No Telegram bot running for account "${accountId}"`,
@@ -275,43 +289,32 @@ export async function handleExternalMessagesRequest(
     return true;
   }
 
-  // Verify token
   if (token !== config.secret) {
     sendJson(res, 401, { ok: false, error: "Invalid authentication token" });
     return true;
   }
 
-  // Build history key
-  const chatId = String(payload.chatId);
-  const historyKey = buildTelegramGroupPeerId(chatId, payload.topicId);
-
-  // Build sender label
-  const senderLabel = buildSenderLabel(payload);
-
-  // Build the history entry
-  const entry: HistoryEntry = {
-    sender: senderLabel,
-    body: payload.text,
-    timestamp: payload.timestamp * 1000, // Convert to milliseconds
-    messageId: String(payload.messageId),
-  };
-
-  // Record to history (silent - no AI trigger)
-  const entries = recordPendingHistoryEntryIfEnabled({
-    historyMap,
-    historyKey,
-    entry,
-    limit: config.historyLimit,
-  });
+  // Build synthetic update and feed it through the bot's pipeline
+  const syntheticUpdate = buildSyntheticUpdate(payload);
 
   logVerbose(
-    `telegram: external message recorded for ${historyKey}: ${senderLabel}: ${payload.text.slice(0, 50)}...`,
+    `telegram: injecting external message for chat ${payload.chatId}: ${payload.senderName}: ${payload.text.slice(0, 50)}...`,
   );
+
+  try {
+    await bot.handleUpdate(syntheticUpdate);
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logVerbose(`telegram: external message processing error: ${errMsg}`);
+    sendJson(res, 500, { ok: false, error: `Processing failed: ${errMsg}` });
+    return true;
+  }
 
   sendJson(res, 200, {
     ok: true,
-    historyKey,
-    entriesCount: entries.length,
+    updateId: syntheticUpdate.update_id,
+    messageId: payload.messageId,
+    chatId: payload.chatId,
   });
 
   return true;
@@ -325,13 +328,11 @@ export function resolveExternalMessagesConfig(
 ): ExternalMessagesConfig | null {
   const cfg = loadConfig();
 
-  // Check for external messages config in telegram channel config
   const telegramConfig = cfg.channels?.telegram;
   if (!telegramConfig) {
     return null;
   }
 
-  // Look for account-specific config first
   const accountConfig = telegramConfig.accounts?.[accountId];
   const externalConfig =
     (accountConfig as Record<string, unknown>)?.externalMessages ??
