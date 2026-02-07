@@ -176,6 +176,10 @@ export function createTelegramBot(opts: TelegramBotOptions) {
 
   const shouldSkipUpdate = (ctx: TelegramUpdateKeyContext) => {
     const updateId = resolveTelegramUpdateId(ctx);
+    // Skip dedup for synthetic (negative) update IDs from external messages
+    if (typeof updateId === "number" && updateId < 0) {
+      return false;
+    }
     if (typeof updateId === "number" && lastUpdateId !== null) {
       if (updateId <= lastUpdateId) {
         return true;

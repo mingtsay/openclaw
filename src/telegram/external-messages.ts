@@ -188,7 +188,7 @@ function buildSyntheticUpdate(payload: ExternalMessagePayload): Update {
     ? ({
         id: chatId,
         type: "supergroup" as const,
-        title: `Chat ${chatId}`,
+        title: payload.chatTitle || `Chat ${chatId}`,
       } as Chat)
     : ({
         id: chatId,
