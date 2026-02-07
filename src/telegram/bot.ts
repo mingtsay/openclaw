@@ -44,6 +44,11 @@ import {
   resolveTelegramForumThreadId,
   resolveTelegramStreamMode,
 } from "./bot/helpers.js";
+import {
+  registerGroupHistories,
+  resolveExternalMessagesConfig,
+  unregisterGroupHistories,
+} from "./external-messages.js";
 import { resolveTelegramFetch } from "./fetch.js";
 import { wasSentByBot } from "./sent-message-cache.js";
 
@@ -230,6 +235,16 @@ export function createTelegramBot(opts: TelegramBotOptions) {
       DEFAULT_GROUP_HISTORY_LIMIT,
   );
   const groupHistories = new Map<string, HistoryEntry[]>();
+
+  // Register group histories for external message injection (Plan C)
+  const externalConfig = resolveExternalMessagesConfig(account.accountId);
+  if (externalConfig) {
+    registerGroupHistories(account.accountId, groupHistories, externalConfig);
+    logVerbose(
+      `telegram: external messages enabled for account ${account.accountId} (historyLimit=${externalConfig.historyLimit})`,
+    );
+  }
+
   const textLimit = resolveTextChunkLimit(cfg, "telegram", account.accountId);
   const dmPolicy = telegramCfg.dmPolicy ?? "pairing";
   const allowFrom = opts.allowFrom ?? telegramCfg.allowFrom;
